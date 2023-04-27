@@ -1,0 +1,102 @@
+import Foundation
+import AVFoundation
+import ShazamKit
+
+class ShazamAnalyzer: NSObject, SHSessionDelegate {
+    let session = SHSession()
+
+    func analyzeAudioFile(url: URL) {
+        let asset = AVAsset(url: url)
+        let assetDuration = asset.duration.seconds
+
+        let chunkDuration = 60.0 // Set the chunk duration to 1 minute (60 seconds)
+        let numberOfChunks = Int(ceil(assetDuration / chunkDuration))
+
+        session.delegate = self
+
+        for i in 0..<numberOfChunks {
+            let startTime = Double(i) * chunkDuration
+            let start = CMTime(seconds: startTime, preferredTimescale: asset.duration.timescale)
+            let end = CMTime(seconds: min(startTime + chunkDuration, assetDuration), preferredTimescale: asset.duration.timescale)
+
+            let range = CMTimeRange(start: start, end: end)
+            if let signature = generateSignature(from: asset, for: range) {
+                print("Processing chunk \(i + 1) from \(start.seconds) to \(end.seconds): \(signature.hash)")
+                print("Chunk saved at: \(url.absoluteString)")
+
+                session.match(signature)
+            } else {
+                print("Error generating signature for chunk \(i + 1)")
+            }
+        }
+    }
+
+
+        func generateSignature(from asset: AVAsset, for timeRange: CMTimeRange) -> SHSignature? {
+            let audioFormat = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)
+            let signatureGenerator = SHSignatureGenerator()
+
+            let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough)!
+            exportSession.timeRange = timeRange
+
+            let reader = try? AVAssetReader(asset: exportSession.asset)
+            let audioOutput = AVAssetReaderAudioMixOutput(audioTracks: exportSession.asset.tracks(withMediaType: .audio), audioSettings: nil)
+            audioOutput.alwaysCopiesSampleData = false
+            reader?.add(audioOutput)
+
+            reader?.startReading()
+
+            while let sampleBuffer = audioOutput.copyNextSampleBuffer() {
+                if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
+                    let length = CMBlockBufferGetDataLength(blockBuffer)
+                    var data = Data(count: length)
+
+                    _ = data.withUnsafeMutableBytes {(bytes: UnsafeMutableRawBufferPointer) in
+                                                     CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length, destination: bytes.baseAddress!)
+                                                     }
+
+                    let audioBuffer = AVAudioPCMBuffer(pcmFormat: audioFormat!, frameCapacity: AVAudioFrameCount(length) / audioFormat!.streamDescription.pointee.mBytesPerFrame)!
+                    guard let channelData = audioBuffer.floatChannelData else {
+                        print("Error: Channel data is nil")
+                        return nil
+                    }
+                    let channels = UnsafeBufferPointer(start: channelData, count: Int(audioFormat!.channelCount))
+                    let destinationBuffer = UnsafeMutableBufferPointer(start: channels[0], count: length)
+                    _ = data.copyBytes(to: destinationBuffer)
+
+                    do {
+                        try signatureGenerator.append(audioBuffer, at: nil)
+                    } catch {
+                        print(
+                            "Error appending buffer to signature generator: \(error)")
+                        return nil
+                    }
+                }
+            }
+
+            return signatureGenerator.signature()
+        }
+
+        func session(_ session: SHSession, didFind match: SHMatch) {
+            if let matchedItem = match.mediaItems.first {
+                print("Match found: \(matchedItem.title ?? "Unknown Title") by \(matchedItem.artist ?? "Unknown Artist")")
+
+            } else {
+                print("Match found, but unable to retrieve media item details.")
+            }
+        }
+
+        func session(_ session: SHSession, didNotFindMatchFor signature: SHSignature, error: Error?) {
+            print("No match found")
+        }
+    }
+
+
+let filePath = "/Users/youssefhemimy/Downloads/beyoncee.mp3" // Replace this with the actual path to your audio file
+
+if let fileURL = URL(string: "file://" + filePath) {
+    let analyzer = ShazamAnalyzer()
+    analyzer.analyzeAudioFile(url: fileURL)
+} else {
+    print("Invalid file path")
+}
